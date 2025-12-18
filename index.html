@@ -7,7 +7,7 @@
   <title>猎奇小网站</title>
 
   <style>
-    /* ✅ 安卓QQ/内置浏览器：全局去掉点击高亮（比只写img更有效） */
+    /* ✅ 安卓QQ/内置浏览器：全局去掉点击高亮 */
     * {
       -webkit-tap-highlight-color: transparent;
       -webkit-touch-callout: none;
@@ -38,13 +38,16 @@
       padding: 40px;
       color: #fff;
       font: 600 32px/1.2 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei";
-      padding-top:120px;     }
+      
+      /* 给内容部分添加适当的上边距 */
+      padding-top: 120px; /* 确保内容不被标题遮挡 */
+    }
 
     /* 图片 */
     .center-img {
       width: 100%;
       max-width: 500px;
-      height: auto;          
+      height: auto;
       display: block;
       margin-left: auto;
       margin-right: auto;
@@ -53,24 +56,27 @@
       user-select: none;
       -webkit-user-drag: none;
     }
-      .site-title{
-  position: fixed;
-  top: 16px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 2;              /* 比内容层更上面（你的 page 是 1） */
-  width: min(70vw, 420px); /* 自适应：手机不超 70%屏宽，电脑最多 420px */
-  height: auto;
-  pointer-events: none;    /* 不挡住下面的点击 */
-  user-select: none;
-  -webkit-user-drag: none;
-}
-    
+
+    /* 顶部标题图片（不固定在顶端，随页面滚动） */
+    .site-title {
+      position: relative;  /* 使标题跟随页面一起滚动 */
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 2;
+      width: min(70vw, 420px);
+      height: auto;
+      pointer-events: none;
+      user-select: none;
+      -webkit-user-drag: none;
+    }
+
     body { background: #000; }
 
     @media (min-width: 768px) {
       .center-img { max-width: 800px; }
     }
+
     @media (min-width: 1024px) {
       .center-img { max-width: 1000px; }
     }
@@ -78,10 +84,11 @@
 </head>
 
 <body>
-<!-- 顶部标题图片（固定在顶端居中） -->
-<img class="site-title" src="./img/title.png" alt="title">
+  <!-- 顶部标题图片（不固定在顶端，随页面滚动） -->
+  <img class="site-title" src="./img/title.png" alt="title">
+
   <!-- 1) 血腥背景层（最底） -->
-  <video id="blood-background" muted autoplay loop playsinline preload="auto" style="display:none">
+  <video id="blood-background" muted autoplay loop playsinline preload="auto">
     <source src="./video/blood.mp4" type="video/mp4">
   </video>
   <canvas id="blood"></canvas>
