@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Arcana - Robust Selection</title>
+  <title>Arcana - Vertical Particles</title>
   <style>
-    body { margin: 0; overflow: hidden; background: #000; }
+    body { margin: 0; overflow: hidden; background: #000; color: #fff; }
     #video-input { 
       position: fixed; bottom: 20px; right: 20px; width: 180px; height: 135px; 
       border-radius: 12px; border: 1px solid rgba(255, 182, 193, 0.3);
@@ -25,7 +25,7 @@
 </head>
 <body>
   <div id="loader">WAKING MAGIC...</div>
-  <div id="ui-right">手部移出：自动归位 · 动画期间：锁定交互</div>
+  <div id="ui-right">垂直粒子 · 相对路径 · 捏合交互</div>
   <video id="video-input" autoplay playsinline></video>
   <div id="container"></div>
 
@@ -37,13 +37,15 @@
   <script>
     let scene, camera, renderer, masterGroup;
     let cards = [];
-    let isLocked = false, isReturning = false, selectedCard = null, isPinching = false;
-    let isAnimating = false; // 全局动画锁
+    let isLocked = false, isReturning = false, selectedCard = null, isPinching = false, isAnimating = false;
     let targetSpeed = 0, currentSpeed = 0;
     const raycaster = new THREE.Raycaster();
     const handCoord = new THREE.Vector2();
+    let pGeometry, pPositions, pOpacity, pVel, pCount = 1200;
 
-    let pGeometry, pPositions, pOpacity, pVel, pCount = 1000;
+    // --- 相对路径配置 ---
+    const CARD_BACK = './img/back.png';
+    const CARD_FRONT = './img/front.png'; 
 
     function initScene() {
       scene = new THREE.Scene();
@@ -58,113 +60,99 @@
       masterGroup = new THREE.Group();
       scene.add(masterGroup);
 
+      // --- 粒子系统：优化后的上升粒子 ---
       pGeometry = new THREE.BufferGeometry();
       pPositions = new Float32Array(pCount * 3);
       pOpacity = new Float32Array(pCount);
       pVel = new Float32Array(pCount * 3); 
-      for(let i=0; i<pCount; i++) {
-        pPositions[i*3+1] = -500;
-        pOpacity[i] = 0;
-      }
+      for(let i=0; i<pCount; i++) { pPositions[i*3+1] = -500; pOpacity[i] = 0; }
       pGeometry.setAttribute('position', new THREE.BufferAttribute(pPositions, 3));
-      const pMaterial = new THREE.PointsMaterial({
-        size: 0.025, color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+      const pMaterial = new THREE.PointsMaterial({ 
+        size: 0.03, color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false 
       });
       scene.add(new THREE.Points(pGeometry, pMaterial));
 
-      const cardMat = new THREE.ShaderMaterial({
-        uniforms: { uTime: { value: 0 }, uOpacity: { value: 1.0 } },
-        vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-        fragmentShader: `
-          uniform float uTime;
-          uniform float uOpacity;
-          varying vec2 vUv;
-          float roundedBox(vec2 p, vec2 b, float r) {
-            vec2 q = abs(p) - b + r;
-            return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
-          }
-          void main() {
-            vec2 p = vUv - 0.5;
-            float d = roundedBox(p, vec2(0.44, 0.47), 0.06);
-            if (d > 0.0) discard;
-            vec3 c1 = vec3(0.95, 0.8, 0.9); vec3 c2 = vec3(0.7, 0.8, 1.0);
-            float wave = sin(vUv.y * 6.0 + uTime * 2.0) * 0.5 + 0.5;
-            vec3 color = mix(c1, c2, wave);
-            float border = smoothstep(0.0, -0.01, d) - smoothstep(-0.01, -0.02, d);
-            gl_FragColor = vec4(color + border * 0.6, uOpacity * 0.85);
-          }
-        `, transparent: true, side: THREE.DoubleSide
-      });
+      const loader = new THREE.TextureLoader();
+      const backTex = loader.load(CARD_BACK);
+      const frontTex = loader.load(CARD_FRONT);
+
+      const cardMaterials = [
+        new THREE.MeshBasicMaterial({ color: 0x1a1a1a }), 
+        new THREE.MeshBasicMaterial({ color: 0x1a1a1a }),
+        new THREE.MeshBasicMaterial({ color: 0x1a1a1a }),
+        new THREE.MeshBasicMaterial({ color: 0x1a1a1a }),
+        new THREE.MeshBasicMaterial({ map: frontTex }), 
+        new THREE.MeshBasicMaterial({ map: backTex })
+      ];
 
       const radius = 5.2;
+      const cardGeo = new THREE.BoxGeometry(1.2, 2.0, 0.04); 
+
       for (let i = 0; i < 22; i++) {
-        const card = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 2.0), cardMat.clone());
+        const card = new THREE.Mesh(cardGeo, cardMaterials);
         const angle = (i / 22) * Math.PI * 2;
         card.position.set(Math.sin(angle) * radius, 0, Math.cos(angle) * radius);
         card.lookAt(0, 0, 0);
         card.userData.homePos = card.position.clone();
         card.userData.homeRot = card.rotation.clone();
+        card.userData.isUp = false; 
         masterGroup.add(card);
         cards.push(card);
       }
     }
 
+    // 指向时的粒子：只向上升
     function emitHoverParticles(card) {
       const wp = new THREE.Vector3(), wq = new THREE.Quaternion();
       card.getWorldPosition(wp);
       card.getWorldQuaternion(wq);
-      for(let i=0; i<5; i++) {
+      for(let i=0; i<6; i++) {
         const idx = Math.floor(Math.random() * pCount);
         if (pOpacity[idx] <= 0) {
-          const localOffset = new THREE.Vector3((Math.random()-0.5)*0.9, -1.0, 0.1);
+          // 在卡牌底部随机生成
+          const localOffset = new THREE.Vector3((Math.random()-0.5)*1.1, -1.0, 0.02);
           localOffset.applyQuaternion(wq);
           pPositions[idx*3] = wp.x + localOffset.x;
           pPositions[idx*3+1] = wp.y + localOffset.y;
           pPositions[idx*3+2] = wp.z + localOffset.z;
-          pVel[idx*3+1] = 0.02 + Math.random() * 0.03;
+          
+          pVel[idx*3] = (Math.random()-0.5) * 0.01; // 极小的水平抖动
+          pVel[idx*3+1] = 0.03 + Math.random() * 0.04; // 显著的垂直升力
+          pVel[idx*3+2] = 0;
           pOpacity[idx] = 1.0;
         }
       }
     }
 
+    // 归位时的粒子：修改为只向上升，不向四周喷射
     function dissolveToDust(card) {
       if (!card || isReturning) return;
-      isReturning = true;
-      isAnimating = true;
-
+      isReturning = true; isAnimating = true; card.userData.isUp = false;
       const startPos = new THREE.Vector3();
       card.getWorldPosition(startPos);
       card.visible = false;
-      
-      // 粒子飞散效果
-      for(let i=0; i < 150; i++) {
+
+      for(let i=0; i < 200; i++) {
         const idx = Math.floor(Math.random() * pCount);
-        pPositions[idx*3] = startPos.x;
-        pPositions[idx*3+1] = startPos.y;
+        // 在卡牌消失的位置生成
+        pPositions[idx*3] = startPos.x + (Math.random()-0.5) * 1.0;
+        pPositions[idx*3+1] = startPos.y + (Math.random()-0.5) * 1.8;
         pPositions[idx*3+2] = startPos.z;
-        pOpacity[idx] = 2.0;
-        pVel[idx*3] = (Math.random()-0.5) * 0.15;
-        pVel[idx*3+1] = (Math.random()-0.5) * 0.15;
-        pVel[idx*3+2] = (Math.random()-0.5) * 0.15;
+        pOpacity[idx] = 1.5; // 更亮一点
+        
+        // 修正：取消四周喷射，全部设为向上的速度
+        pVel[idx*3] = (Math.random()-0.5) * 0.02;
+        pVel[idx*3+1] = 0.05 + Math.random() * 0.08; // 快速上升
+        pVel[idx*3+2] = (Math.random()-0.5) * 0.02;
       }
 
       gsap.to(card.position, {
         x: card.userData.homePos.x, y: card.userData.homePos.y, z: card.userData.homePos.z,
-        duration: 0.6, ease: "power2.inOut",
+        duration: 0.7, ease: "power2.inOut",
         onComplete: () => {
-          card.rotation.copy(card.userData.homeRot);
-          masterGroup.add(card);
-          card.visible = true;
-          card.scale.set(0,0,0);
-          gsap.to(card.scale, {
-            x:1, y:1, z:1, duration: 0.4, 
-            onComplete: () => {
-              isLocked = false; 
-              isReturning = false; 
-              selectedCard = null;
-              isAnimating = false; // 解锁交互
-            }
-          });
+          card.rotation.copy(card.userData.homeRot); 
+          masterGroup.add(card); card.visible = true; card.scale.set(0,0,0);
+          gsap.to(card.scale, { x:1, y:1, z:1, duration: 0.4, onComplete: () => { isLocked = false; isReturning = false; selectedCard = null; isAnimating = false; } });
         }
       });
     }
@@ -174,122 +162,71 @@
       const video = document.getElementById('video-input');
       const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
       hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7 });
-
       hands.onResults(results => {
-        // 如果手部移出屏幕
         if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
           targetSpeed = 0;
-          if (isLocked && !isReturning && !isAnimating) {
-            isPinching = false;
-            dissolveToDust(selectedCard);
-          }
+          if (isLocked && !isReturning && !isAnimating) { isPinching = false; dissolveToDust(selectedCard); }
           return;
         }
-
         const lm = results.multiHandLandmarks[0];
         const palmX = 1 - lm[9].x;   
         handCoord.set(palmX * 2 - 1, -(lm[8].y * 2 - 1));
-        
         if (!isLocked) targetSpeed = (palmX - 0.5) * 0.18;
-
-        // 只有在非动画状态下才允许检测捏合
         const dist = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
-        if (dist < 0.045) {
-          if (!isPinching && !isLocked && !isReturning && !isAnimating) {
-            isPinching = true; pickup();
-          }
-        } else if (dist > 0.12) {
-          if (isPinching && isLocked) {
-            isPinching = false; dissolveToDust(selectedCard);
-          } else { isPinching = false; }
-        }
+        if (dist < 0.045) { if (!isPinching && !isLocked && !isReturning && !isAnimating) { isPinching = true; pickup(); }
+        } else if (dist > 0.12) { if (isPinching && isLocked) { isPinching = false; dissolveToDust(selectedCard); } else { isPinching = false; } }
       });
-
-      const cameraHelper = new Camera(video, {
-        onFrame: async () => await hands.send({ image: video }),
-        width: 640, height: 480
-      });
-
-      cameraHelper.start().then(() => {
-        document.getElementById('loader').style.opacity = '0';
-        setTimeout(() => document.getElementById('loader').style.display = 'none', 800);
-        animate();
-      });
+      new Camera(video, { onFrame: async () => await hands.send({ image: video }), width: 640, height: 480 }).start();
+      document.getElementById('loader').style.opacity = '0';
+      setTimeout(() => document.getElementById('loader').style.display = 'none', 800);
+      animate();
     }
 
     function pickup() {
       if (isAnimating) return;
-      
       raycaster.setFromCamera(handCoord, camera);
       const hits = raycaster.intersectObjects(cards);
-      
       if (hits.length > 0) {
-        isAnimating = true;
-        isLocked = true;
-        selectedCard = hits[0].object;
+        isAnimating = true; isLocked = true; selectedCard = hits[0].object;
         scene.attach(selectedCard);
-        
-        gsap.to(selectedCard.position, { 
-          x: 0, y: 0, z: -1.4, 
-          duration: 0.8, 
-          ease: "expo.out",
-          onComplete: () => { isAnimating = false; } // 拉取完成，解锁捏住状态下的动画控制
-        });
-        gsap.to(selectedCard.rotation, { x: 0, y: Math.PI * 2, z: 0, duration: 1.0 });
-      } else { 
-        isPinching = false; 
-      }
+        gsap.to(selectedCard.position, { x: 0, y: 0, z: -1.4, duration: 0.8, ease: "expo.out", onComplete: () => { isAnimating = false; } });
+        gsap.to(selectedCard.rotation, { x: 0, y: Math.PI, z: 0, duration: 1.0 });
+      } else { isPinching = false; }
     }
 
     function animate(time) {
       requestAnimationFrame(animate);
-      const t = time * 0.001;
-
       if (!isLocked) {
-        currentSpeed += (targetSpeed - currentSpeed) * 0.05;
-        currentSpeed *= 0.95;
-
+        currentSpeed += (targetSpeed - currentSpeed) * 0.05; currentSpeed *= 0.95;
         if (!isReturning && !isAnimating) {
             raycaster.setFromCamera(handCoord, camera);
             const hits = raycaster.intersectObjects(cards);
             let hitObject = hits.length > 0 ? hits[0].object : null;
-
-            if (hitObject) {
-                currentSpeed = 0; 
-                targetSpeed = 0;
-            }
-
+            if (hitObject) { currentSpeed = 0; targetSpeed = 0; }
             cards.forEach(c => {
-                c.material.uniforms.uTime.value = t;
                 if (hitObject === c) {
                     emitHoverParticles(c);
-                    gsap.to(c.position, { y: 0.4, duration: 0.3, overwrite: 'auto' });
+                    if (!c.userData.isUp) { c.userData.isUp = true; gsap.to(c.position, { y: 0.5, duration: 0.3, ease: "power1.out", overwrite: true }); }
                 } else {
-                    gsap.to(c.position, { y: 0, duration: 0.5, overwrite: 'auto' });
+                    if (c.userData.isUp) { c.userData.isUp = false; gsap.to(c.position, { y: 0, duration: 0.4, ease: "power1.inOut", overwrite: true }); }
                 }
             });
         }
         masterGroup.rotation.y += currentSpeed;
-      } else if (selectedCard) {
-        selectedCard.material.uniforms.uTime.value = t;
       }
-
-      // 粒子逻辑保持不变
+      // 粒子上升物理引擎
       for(let i=0; i<pCount; i++) {
         if(pOpacity[i] > 0) {
-          pPositions[i*3] += pVel[i*3] || 0;
-          pPositions[i*3+1] += pVel[i*3+1];
-          pPositions[i*3+2] += pVel[i*3+2] || 0;
-          pOpacity[i] -= 0.02;
-          if (pOpacity[i] <= 0) {
-              pPositions[i*3+1] = -500;
-          }
+          pPositions[i*3] += pVel[i*3];
+          pPositions[i*3+1] += pVel[i*3+1]; // Y 轴始终增加
+          pPositions[i*3+2] += pVel[i*3+2];
+          pOpacity[i] -= 0.02; // 减缓消失速度，看起来更轻盈
+          if (pOpacity[i] <= 0) pPositions[i*3+1] = -500;
         }
       }
       pGeometry.attributes.position.needsUpdate = true;
       renderer.render(scene, camera);
     }
-
     window.onload = startAuto;
   </script>
 </body>
