@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Arcana - Particle Dissolve Edition</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; }
+    #video-input { 
+      position: fixed; bottom: 20px; right: 20px; width: 180px; height: 135px; 
+      border-radius: 12px; border: 1px solid rgba(255, 182, 193, 0.3);
+      z-index: 500; object-fit: cover; transform: scaleX(-1); background: #000;
+    }
+    #ui-right {
+      position: fixed; top: 40px; right: 40px; color: #ffb7c5; font-family: sans-serif; z-index: 100;
+      letter-spacing: 2px; font-size: 12px; background: rgba(255, 182, 193, 0.1);
+      padding: 10px 20px; border-right: 2px solid #ffb7c5; backdrop-filter: blur(5px);
+    }
+    #loader {
+      position: fixed; inset: 0; background: #000; display: flex;
+      align-items: center; justify-content: center; z-index: 2000;
+      color: #ffb7c5; font-family: serif; letter-spacing: 5px; transition: opacity 0.8s;
+    }
+  </style>
+</head>
+<body>
+  <div id="loader">WAKING MAGIC...</div>
+  <div id="ui-right">捏合抓取 · 张开手掌消散</div>
+  <video id="video-input" autoplay playsinline></video>
+  <div id="container"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.11.4/dist/gsap.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <script>
+    let scene, camera, renderer, masterGroup;
+    let cards = [];
+    let isLocked = false, isReturning = false, selectedCard = null, isPinching = false;
+    let targetSpeed = 0, currentSpeed = 0;
+    const raycaster = new THREE.Raycaster();
+    const handCoord = new THREE.Vector2();
+    let fingerParticle = null; // 食指的粒子
+    const pinchDistance = 0.04; // 捏合阈值
+
+    // 粒子系统
+    let pGeometry, pPositions, pOpacity, pVel, pCount = 1000;
+
+    function initScene() {
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.z = 0.5;
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      document.getElementById('container').appendChild(renderer.domElement);
+
+      masterGroup = new THREE.Group();
+      scene.add(masterGroup);
+
+      // 粒子系统初始化
+      pGeometry = new THREE.BufferGeometry();
+      pPositions = new Float32Array(pCount * 3);
+      pOpacity = new Float32Array(pCount);
+      pVel = new Float32Array(pCount * 3); 
+      for (let i = 0; i < pCount; i++) {
+        pPositions[i * 3 + 1] = -500;
+        pOpacity[i] = 0;
+      }
+      pGeometry.setAttribute('position', new THREE.BufferAttribute(pPositions, 3));
+      const pMaterial = new THREE.PointsMaterial({
+        size: 0.025, color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+      });
+      const pSystem = new THREE.Points(pGeometry, pMaterial);
+      scene.add(pSystem);
+
+      const cardMat = new THREE.ShaderMaterial({
+        uniforms: { uTime: { value: 0 }, uOpacity: { value: 1.0 } },
+        vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+        fragmentShader: `
+          uniform float uTime;
+          uniform float uOpacity;
+          varying vec2 vUv;
+          float roundedBox(vec2 p, vec2 b, float r) {
+            vec2 q = abs(p) - b + r;
+            return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+          }
+          void main() {
+            vec2 p = vUv - 0.5;
+            float d = roundedBox(p, vec2(0.44, 0.47), 0.06);
+            if (d > 0.0) discard;
+            vec3 c1 = vec3(0.95, 0.8, 0.9); vec3 c2 = vec3(0.7, 0.8, 1.0);
+            float wave = sin(vUv.y * 6.0 + uTime * 2.0) * 0.5 + 0.5;
+            vec3 color = mix(c1, c2, wave);
+            float border = smoothstep(0.0, -0.01, d) - smoothstep(-0.01, -0.02, d);
+            gl_FragColor = vec4(color + border * 0.6, uOpacity * 0.85);
+          }
+        `, transparent: true, side: THREE.DoubleSide
+      });
+
+      const radius = 5.2;
+      for (let i = 0; i < 22; i++) {
+        const card = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 2.0), cardMat.clone());
+        const angle = (i / 22) * Math.PI * 2;
+        card.position.set(Math.sin(angle) * radius, 0, Math.cos(angle) * radius);
+        card.lookAt(0, 0, 0);
+        card.userData.angle = angle;
+        card.userData.homePos = card.position.clone();
+        card.userData.homeRot = card.rotation.clone();
+        masterGroup.add(card);
+        cards.push(card);
+      }
+    }
+
+    // 显示食指粒子
+    function showFingerParticle(lm) {
+      const fingerX = lm[8].x; // 食指尖的位置
+      const fingerY = lm[8].y;
+      const particleSize = 0.05;
+
+      if (!fingerParticle) {
+        const geometry = new THREE.CircleGeometry(particleSize, 32);
+        const material = new THREE.MeshBasicMaterial({ color: 0x00ff00, emissive: 0x00ff00, transparent: true });
+        fingerParticle = new THREE.Mesh(geometry, material);
+        scene.add(fingerParticle);
+      }
+
+      fingerParticle.position.set(fingerX * 2 - 1, -(fingerY * 2 - 1), -0.5); // 显示在食指位置
+
+      // 检测食指和拇指的距离
+      const thumb = lm[4]; // 拇指位置
+      const dist = Math.hypot(fingerX - thumb.x, fingerY - thumb.y);
+
+      if (dist < pinchDistance) { // 如果距离小于阈值，激活浮动和选卡
+        hoverCardAtFingerPosition(lm);
+      }
+    }
+
+    // 选取卡牌：食指圆形粒子与卡牌的交集
+    function hoverCardAtFingerPosition(lm) {
+      raycaster.setFromCamera(handCoord, camera);
+      const hits = raycaster.intersectObjects(cards);
+      if (hits.length > 0) {
+        const hitCard = hits[0].object;
+        if (!hitCard.userData.isFloating) {
+          hitCard.userData.isFloating = true;
+          gsap.to(hitCard.position, { y: 0.4, duration: 0.3 }); // 卡牌浮动
+          emitHoverParticles(hitCard); // 发射粒子
+        }
+      }
+    }
+
+    // 手指捏合选卡逻辑
+    function pinchAndSelectCard(lm) {
+      const thumb = lm[4]; // 拇指位置
+      const dist = Math.hypot(lm[8].x - thumb.x, lm[8].y - thumb.y);
+
+      if (dist < pinchDistance) { // 捏合时选卡
+        if (!isLocked) {
+          pickup(); // 执行抓取
+        }
+      }
+    }
+
+    // 处理抓取动作
+    function pickup() {
+      raycaster.setFromCamera(handCoord, camera);
+      const hits = raycaster.intersectObjects(cards);
+      if (hits.length > 0) {
+        isLocked = true;
+        selectedCard = hits[0].object;
+        scene.attach(selectedCard);
+        gsap.to(selectedCard.position, { x: 0, y: 0, z: -1.4, duration: 0.8, ease: "expo.out" });
+        gsap.to(selectedCard.rotation, { x: 0, y: Math.PI * 2, z: 0, duration: 1.0 });
+      } else {
+        isPinching = false; // 没点到牌则重置捏合状态
+      }
+    }
+
+    async function startAuto() {
+      initScene();
+      const video = document.getElementById('video-input');
+      const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+      hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7 });
+
+      hands.onResults(results => {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+          const lm = results.multiHandLandmarks[0]; // 获取第一只手的手势
+          const palmX = 1 - lm[9].x;
+          handCoord.set(palmX * 2 - 1, -(lm[8].y * 2 - 1));
+          
+          if (!isLocked) targetSpeed = (palmX - 0.5) * 0.18;
+
+          // 识别食指与拇指接触
+          showFingerParticle(lm);
+          pinchAndSelectCard(lm); // 处理捏合选卡
+        } else { 
+          targetSpeed = 0; 
+        }
+      });
+
+      const cameraHelper = new Camera(video, {
+        onFrame: async () => await hands.send({ image: video }),
+        width: 640, height: 480
+      });
+
+      try {
+        await cameraHelper.start();
+        document.getElementById('loader').style.opacity = '0';
+        setTimeout(() => document.getElementById('loader').style.display = 'none', 800);
+        animate();
+      } catch (e) { document.getElementById('loader').innerText = "CAMERA ERROR"; }
+    }
+
+    function animate(time) {
+      requestAnimationFrame(animate);
+      const t = time * 0.001;
+
+      if (!isLocked) {
+        currentSpeed += (targetSpeed - currentSpeed) * 0.05;
+        currentSpeed *= 0.95;
+        masterGroup.rotation.y += currentSpeed;
+      } else if (selectedCard) {
+        selectedCard.material.uniforms.uTime.value = t;
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    window.onload = startAuto;
+  </script>
+</body>
+</html>
