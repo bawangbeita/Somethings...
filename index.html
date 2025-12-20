@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Arcana - Luminous Galaxy</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; }
+    #ui-right {
+      position: fixed; top: 40px; right: 40px; color: #FBD0E4; font-family: sans-serif; z-index: 100;
+      letter-spacing: 2px; font-size: 12px; background: rgba(251, 208, 228, 0.1);
+      padding: 10px 20px; border-right: 2px solid #FBD0E4; backdrop-filter: blur(5px);
+    }
+    #loader {
+      position: fixed; inset: 0; background: #000; display: flex;
+      align-items: center; justify-content: center; z-index: 2000;
+      color: #FBD0E4; font-family: serif; letter-spacing: 5px; transition: opacity 0.8s;
+    }
+  </style>
+</head>
+<body>
+  <div id="loader">WAKING MAGIC...</div>
+  <div id="ui-right">阶段: 待机展示 | 模式: 旋转控制</div>
+  <div id="container"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.11.4/dist/gsap.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <script>
+    let scene, camera, renderer, masterGroup, reticleGroup, galaxyPoints;
+    let cards = [];
+    let state = 'SHOWREEL'; 
+    let interactionMode = 'PALM'; 
+    let isLocked = false, isReturning = false, selectedCard = null, isPinching = false;
+    let isAnimating = false, isReadyToRelease = false;
+    let targetSpeed = 0, currentSpeed = 0.005; 
+    
+    const lerpTargetPos = new THREE.Vector3(0, 0, 0);
+    const raycaster = new THREE.Raycaster();
+    const handCoord = new THREE.Vector2(-10, -10);
+
+    let pGeometry, pPositions, pOpacity, pVel, pCount = 1000;
+
+    function initScene() {
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.set(0, 0, 8);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      document.getElementById('container').appendChild(renderer.domElement);
+
+      masterGroup = new THREE.Group();
+      scene.add(masterGroup);
+
+      createGalaxy();
+      createReticle();
+      createInteractionParticles();
+      createCards();
+    }
+
+    function createStarSprite() {
+      const canvas = document.createElement('canvas');
+      canvas.width = 64;
+      canvas.height = 64;
+      const ctx = canvas.getContext('2d');
+      const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gradient.addColorStop(0, 'rgba(255,255,255,1)');
+      gradient.addColorStop(0.2, 'rgba(255,255,255,0.8)');
+      gradient.addColorStop(0.5, 'rgba(255,255,255,0.2)');
+      gradient.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 64, 64);
+      return new THREE.CanvasTexture(canvas);
+    }
+
+    function createGalaxy() {
+      const gCount = 20000; 
+      const geo = new THREE.BufferGeometry();
+      const pos = new Float32Array(gCount * 3);
+      const colors = new Float32Array(gCount * 3);
+      const colorPalette = [
+        new THREE.Color(0xffffff),
+        new THREE.Color(0xffd1e8),
+        new THREE.Color(0xd1e8ff),
+        new THREE.Color(0xe8d1ff)
+      ];
+
+      for (let i = 0; i < gCount; i++) {
+        const r = 10 + Math.random() * 50;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        pos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+        pos[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+        pos[i * 3 + 2] = r * Math.cos(phi);
+
+        const col = colorPalette[Math.floor(Math.random() * colorPalette.length)];
+        colors[i * 3] = col.r;
+        colors[i * 3 + 1] = col.g;
+        colors[i * 3 + 2] = col.b;
+      }
+
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      
+      const mat = new THREE.PointsMaterial({
+        size: 0.15,
+        map: createStarSprite(),
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.8,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        sizeAttenuation: true
+      });
+
+      galaxyPoints = new THREE.Points(geo, mat);
+      scene.add(galaxyPoints);
+    }
+
+    function createReticle() {
+      reticleGroup = new THREE.Group();
+      const core = new THREE.Mesh(
+        new THREE.SphereGeometry(0.012, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xffffff })
+      );
+      const glow = new THREE.Mesh(
+        new THREE.SphereGeometry(0.025, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.4, blending: THREE.AdditiveBlending })
+      );
+      reticleGroup.add(core, glow);
+      reticleGroup.visible = false;
+      scene.add(reticleGroup);
+    }
+
+    function createInteractionParticles() {
+      pGeometry = new THREE.BufferGeometry();
+      pPositions = new Float32Array(pCount * 3);
+      pOpacity = new Float32Array(pCount);
+      pVel = new Float32Array(pCount * 3); 
+      for(let i=0; i<pCount; i++) { pPositions[i*3+1] = -500; pOpacity[i] = 0; }
+      pGeometry.setAttribute('position', new THREE.BufferAttribute(pPositions, 3));
+      scene.add(new THREE.Points(pGeometry, new THREE.PointsMaterial({
+        size: 0.02, color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+      })));
+    }
+
+    function createCards() {
+      const cardMat = new THREE.ShaderMaterial({
+        uniforms: { uOpacity: { value: 1.0 } },
+        vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+        fragmentShader: `
+          uniform float uOpacity;
+          varying vec2 vUv;
+          float roundedBox(vec2 p, vec2 b, float r) {
+            vec2 q = abs(p) - b + r;
+            return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+          }
+          void main() {
+            vec2 p = vUv - 0.5;
+            float d = roundedBox(p, vec2(0.45, 0.47), 0.05);
+            if (d > 0.0) discard;
+            vec3 basePink = vec3(0.984, 0.816, 0.894); 
+            vec3 lightPink = vec3(1.0, 0.95, 0.98);    
+            vec3 darkPink = vec3(0.85, 0.55, 0.65);    
+            vec3 finalColor;
+            if (gl_FrontFacing) {
+              float border = smoothstep(0.0, -0.01, d) - smoothstep(-0.01, -0.015, d);
+              finalColor = mix(basePink, lightPink, border);
+            } else {
+              vec2 uv = (vUv - 0.5) * 2.0;
+              uv.x *= 0.6;
+              float dist = length(uv);
+              float circle = smoothstep(0.45, 0.44, dist) - smoothstep(0.43, 0.42, dist);
+              float circleInner = smoothstep(0.1, 0.09, dist) - smoothstep(0.08, 0.07, dist);
+              float angle = atan(uv.y, uv.x);
+              float rays = pow(abs(sin(angle * 8.0)), 30.0) * smoothstep(0.45, 0.4, dist);
+              float diamond = smoothstep(0.01, 0.0, abs(abs(uv.x) + abs(uv.y*0.6) - 0.35));
+              float pattern = clamp(circle + circleInner + rays + diamond, 0.0, 1.0);
+              finalColor = mix(basePink * 0.95, darkPink, pattern);
+              float border = smoothstep(0.0, -0.01, d) - smoothstep(-0.01, -0.015, d);
+              finalColor = mix(finalColor, lightPink, border);
+            }
+            gl_FragColor = vec4(finalColor, uOpacity * 0.98);
+          }
+        `, 
+        transparent: true, side: THREE.DoubleSide
+      });
+
+      const radius = 5.2;
+      const geo = new THREE.PlaneGeometry(1.2, 2.0);
+      for (let i = 0; i < 22; i++) {
+        const card = new THREE.Mesh(geo, cardMat.clone());
+        const angle = (i / 22) * Math.PI * 2;
+        card.position.set(Math.sin(angle) * radius, 0, Math.cos(angle) * radius);
+        card.lookAt(0, 0, 0);
+        card.userData.homePos = card.position.clone();
+        card.userData.homeRot = card.rotation.clone();
+        card.userData.isUp = false;
+        masterGroup.add(card);
+        cards.push(card);
+      }
+    }
+
+    function triggerMagicEntrance() {
+      state = 'TRANSITION';
+      document.getElementById('ui-right').innerText = "阶段: 魔力觉醒";
+      const tl = gsap.timeline({ onComplete: () => { 
+        state = 'INTERACTIVE'; 
+        document.getElementById('ui-right').innerText = "阶段: 手势交互 | 模式: 旋转控制";
+      }});
+      tl.to(masterGroup.position, { y: 10, duration: 1.5, ease: "power2.inOut" });
+      tl.to(camera.position, { z: 0.5, duration: 1.2, ease: "expo.inOut" }, "-=1.0");
+      tl.add(() => { masterGroup.position.y = 0; cards.forEach(c => c.position.y = 10); });
+      tl.to(cards.map(c => c.position), { y: 0, duration: 0.8, stagger: { each: 0.04 }, ease: "power3.out" });
+    }
+
+    async function startAuto() {
+      initScene();
+      const videoElement = document.createElement('video');
+      videoElement.autoplay = true; videoElement.playsInline = true;
+      const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+      hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7 });
+
+      hands.onResults(results => {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+          if (state === 'SHOWREEL') triggerMagicEntrance();
+          if (state === 'INTERACTIVE') {
+            const lm = results.multiHandLandmarks[0];
+            const isIndexUp = lm[8].y < lm[6].y;
+            const isMiddleDown = lm[12].y > lm[10].y;
+            const isRingDown = lm[16].y > lm[14].y;
+
+            if (isIndexUp && isMiddleDown && isRingDown) {
+              interactionMode = 'POINTER';
+              reticleGroup.visible = true;
+            } else {
+              interactionMode = 'PALM';
+              reticleGroup.visible = false;
+            }
+
+            const palmX = 1 - lm[9].x;   
+            handCoord.set(palmX * 2 - 1, -(lm[8].y * 2 - 1));
+            const vector = new THREE.Vector3(handCoord.x, handCoord.y, 0.5).unproject(camera);
+            const dir = vector.sub(camera.position).normalize();
+            lerpTargetPos.copy(camera.position.clone().add(dir.multiplyScalar(0.45)));
+
+            if (interactionMode === 'PALM' && !isLocked) targetSpeed = (palmX - 0.5) * 0.18;
+            else targetSpeed = 0;
+
+            const dist = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
+            if (dist < 0.05) { 
+              if (!isPinching && !isLocked && !isReturning && !isAnimating) { 
+                isPinching = true; pickup(); 
+              } 
+            }
+            else if (dist > 0.1) { 
+              if (isPinching && isLocked && isReadyToRelease) { 
+                isPinching = false; dissolveToDust(selectedCard); 
+              } else isPinching = false; 
+            }
+          }
+        } else {
+          handCoord.set(-10, -10); targetSpeed = 0; reticleGroup.visible = false;
+        }
+      });
+
+      new Camera(videoElement, { onFrame: async () => { await hands.send({ image: videoElement }); }, width: 640, height: 480 }).start();
+      document.getElementById('loader').style.opacity = '0';
+      setTimeout(() => document.getElementById('loader').style.display = 'none', 800);
+      animate();
+    }
+
+    function pickup() {
+      if (isAnimating) return;
+      raycaster.setFromCamera(handCoord, camera);
+      const hits = raycaster.intersectObjects(cards);
+      if (hits.length > 0) {
+        isAnimating = true; isLocked = true; isReadyToRelease = false;
+        selectedCard = hits[0].object;
+        scene.attach(selectedCard);
+        gsap.to(selectedCard.position, { x: 0, y: 0, z: -1.4, duration: 0.8, ease: "expo.out", onComplete: () => { isAnimating = false; isReadyToRelease = true; }});
+        gsap.to(selectedCard.rotation, { x: 0, y: Math.PI * 2, z: 0, duration: 1.0 });
+      } else isPinching = false;
+    }
+
+    // --- 修改部分：卡牌向上消失与落下显型 ---
+    function dissolveToDust(card) {
+      if (!card || isReturning) return;
+      isReturning = true; isAnimating = true; isReadyToRelease = false;
+      
+      const currentPos = new THREE.Vector3();
+      card.getWorldPosition(currentPos);
+
+      const releaseTl = gsap.timeline({
+        onComplete: () => {
+          // 消失动画结束，开始归位动画
+          card.position.copy(card.userData.homePos);
+          card.position.y += 2.0; // 从归位点上方 2.0 位置开始落下
+          card.rotation.copy(card.userData.homeRot);
+          masterGroup.add(card);
+
+          const returnTl = gsap.timeline({
+            onComplete: () => {
+              isLocked = false; 
+              isReturning = false; 
+              selectedCard = null; 
+              isAnimating = false;
+            }
+          });
+          
+          // 落下并变亮
+          returnTl.to(card.position, { y: card.userData.homePos.y, duration: 0.8, ease: "power2.out" });
+          returnTl.to(card.material.uniforms.uOpacity, { value: 1.0, duration: 0.8 }, 0);
+        }
+      });
+
+      // 向上升起并消失
+      releaseTl.to(card.position, { y: currentPos.y + 2.0, duration: 0.6, ease: "power2.in" });
+      releaseTl.to(card.material.uniforms.uOpacity, { value: 0, duration: 0.6, ease: "power2.in" }, 0);
+
+      // 粒子效果（向上飘）
+      for(let i=0; i < 100; i++) {
+        const idx = Math.floor(Math.random() * pCount);
+        pPositions[idx*3] = currentPos.x + (Math.random()-0.5) * 0.8;
+        pPositions[idx*3+1] = currentPos.y + (Math.random()-0.5) * 1.5;
+        pPositions[idx*3+2] = currentPos.z;
+        pOpacity[idx] = 1.2; 
+        pVel[idx*3+1] = 0.05 + Math.random() * 0.05;
+      }
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const time = Date.now() * 0.0001;
+      reticleGroup.position.lerp(lerpTargetPos, 0.15);
+
+      if (galaxyPoints) {
+        galaxyPoints.rotation.y = time * 0.2;
+        galaxyPoints.rotation.z = time * 0.1;
+      }
+
+      if (state === 'SHOWREEL') {
+        masterGroup.rotation.y += currentSpeed;
+      } else if (state === 'INTERACTIVE') {
+        currentSpeed = (interactionMode === 'PALM') ? currentSpeed + (targetSpeed - currentSpeed) * 0.05 : currentSpeed * 0.9;
+        if (!isLocked) {
+          masterGroup.rotation.y += currentSpeed;
+          raycaster.setFromCamera(handCoord, camera);
+          const hits = raycaster.intersectObjects(cards);
+          let hitObject = hits.length > 0 ? hits[0].object : null;
+
+          if (interactionMode === 'POINTER' && hitObject && !isReturning && !isAnimating) {
+            if (!hitObject.userData.isUp) {
+              hitObject.userData.isUp = true;
+              gsap.to(hitObject.position, { y: 0.5, duration: 0.3, ease: "power2.out", overwrite: true });
+            }
+          }
+          cards.forEach(c => {
+            if (c !== hitObject && c.userData.isUp) {
+              c.userData.isUp = false;
+              gsap.to(c.position, { y: 0, duration: 0.4, ease: "power2.inOut", overwrite: true });
+            }
+          });
+        }
+      }
+
+      for(let i=0; i<pCount; i++) {
+        if(pOpacity[i] > 0) {
+          pPositions[i*3+1] += pVel[i*3+1];
+          pOpacity[i] -= 0.03;
+          if (pOpacity[i] <= 0) pPositions[i*3+1] = -500;
+        }
+      }
+      pGeometry.attributes.position.needsUpdate = true;
+      renderer.render(scene, camera);
+    }
+    window.onload = startAuto;
+  </script>
+</body>
+</html>
