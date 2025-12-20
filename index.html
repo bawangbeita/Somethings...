@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Arcana - Gesture Fix Edition</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; }
+    #video-input { 
+      position: fixed; bottom: 20px; right: 20px; width: 180px; height: 135px; 
+      border-radius: 12px; border: 1px solid rgba(255, 182, 193, 0.3);
+      z-index: 500; object-fit: cover; transform: scaleX(-1); background: #000;
+    }
+    #ui-right {
+      position: fixed; top: 40px; right: 40px; color: #ffb7c5; font-family: sans-serif; z-index: 100;
+      letter-spacing: 2px; font-size: 12px; background: rgba(255, 182, 193, 0.1);
+      padding: 10px 20px; border-right: 2px solid #ffb7c5; backdrop-filter: blur(5px);
+    }
+    #loader {
+      position: fixed; inset: 0; background: #000; display: flex;
+      align-items: center; justify-content: center; z-index: 2000;
+      color: #ffb7c5; font-family: serif; letter-spacing: 5px; transition: opacity 0.8s;
+    }
+  </style>
+</head>
+<body>
+  <div id="loader">WAKING MAGIC...</div>
+  <div id="ui-right">手掌：滑动旋转 · 食指：选牌(浮起+粒子)</div>
+  <video id="video-input" autoplay playsinline></video>
+  <div id="container"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.11.4/dist/gsap.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <script>
+    let scene, camera, renderer, masterGroup;
+    let cards = [];
+    let isLocked = false, isReturning = false, selectedCard = null, isPinching = false;
+    let targetSpeed = 0, currentSpeed = 0;
+    let gestureMode = "palm"; 
+    
+    const raycaster = new THREE.Raycaster();
+    const handCoord = new THREE.Vector2();
+    let pGeometry, pPositions, pOpacity, pVel, pCount = 1000;
+
+    function initScene() {
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.z = 0.5;
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      document.getElementById('container').appendChild(renderer.domElement);
+
+      masterGroup = new THREE.Group();
+      scene.add(masterGroup);
+
+      // 粒子系统
+      pGeometry = new THREE.BufferGeometry();
+      pPositions = new Float32Array(pCount * 3);
+      pOpacity = new Float32Array(pCount);
+      pVel = new Float32Array(pCount * 3); 
+      for(let i=0; i<pCount; i++) { pPositions[i*3+1] = -500; pOpacity[i] = 0; }
+      pGeometry.setAttribute('position', new THREE.BufferAttribute(pPositions, 3));
+      const pMaterial = new THREE.PointsMaterial({
+        size: 0.025, color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
+      });
+      const pSystem = new THREE.Points(pGeometry, pMaterial);
+      scene.add(pSystem);
+
+      const cardMat = new THREE.ShaderMaterial({
+        uniforms: { uTime: { value: 0 }, uOpacity: { value: 1.0 } },
+        vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+        fragmentShader: `
+          uniform float uTime; uniform float uOpacity; varying vec2 vUv;
+          float roundedBox(vec2 p, vec2 b, float r) {
+            vec2 q = abs(p) - b + r; return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+          }
+          void main() {
+            vec2 p = vUv - 0.5; float d = roundedBox(p, vec2(0.44, 0.47), 0.06);
+            if (d > 0.0) discard;
+            vec3 c1 = vec3(0.95, 0.8, 0.9); vec3 c2 = vec3(0.7, 0.8, 1.0);
+            float wave = sin(vUv.y * 6.0 + uTime * 2.0) * 0.5 + 0.5;
+            gl_FragColor = vec4(mix(c1, c2, wave) + (smoothstep(0.0, -0.01, d) - smoothstep(-0.01, -0.02, d)) * 0.6, uOpacity * 0.85);
+          }
+        `, transparent: true, side: THREE.DoubleSide
+      });
+
+      const radius = 5.2;
+      for (let i = 0; i < 22; i++) {
+        const card = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 2.0), cardMat.clone());
+        const angle = (i / 22) * Math.PI * 2;
+        card.position.set(Math.sin(angle) * radius, 0, Math.cos(angle) * radius);
+        card.lookAt(0, 0, 0);
+        card.userData.homePos = card.position.clone();
+        card.userData.homeRot = card.rotation.clone();
+        masterGroup.add(card);
+        cards.push(card);
+      }
+    }
+
+    function emitHoverParticles(card) {
+      const wp = new THREE.Vector3(), wq = new THREE.Quaternion();
+      card.getWorldPosition(wp);
+      card.getWorldQuaternion(wq);
+      // 增加每帧粒子数确保视觉连贯
+      for(let i=0; i<8; i++) {
+        const idx = Math.floor(Math.random() * pCount);
+        if (pOpacity[idx] <= 0) {
+          const localOffset = new THREE.Vector3((Math.random()-0.5)*0.9, -1.0, 0.1);
+          localOffset.applyQuaternion(wq);
+          pPositions[idx*3] = wp.x + localOffset.x;
+          pPositions[idx*3+1] = wp.y + localOffset.y;
+          pPositions[idx*3+2] = wp.z + localOffset.z;
+          pVel[idx*3+1] = 0.02 + Math.random() * 0.03;
+          pOpacity[idx] = 1.0;
+        }
+      }
+    }
+
+    function checkGesture(lm) {
+        // 优化判定：只要中指和无名指明显低于食指且靠近掌心
+        const fingersCurled = lm[12].y > lm[10].y && lm[16].y > lm[14].y;
+        const indexPointing = lm[8].y < lm[6].y;
+        return (fingersCurled && indexPointing) ? "pointing" : "palm";
+    }
+
+    async function startAuto() {
+      initScene();
+      const video = document.getElementById('video-input');
+      const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+      hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7 });
+
+      hands.onResults(results => {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+          const lm = results.multiHandLandmarks[0];
+          gestureMode = checkGesture(lm);
+          
+          const tipX = 1 - lm[8].x;
+          handCoord.set(tipX * 2 - 1, -(lm[8].y * 2 - 1));
+          
+          if (!isLocked) {
+              if (gestureMode === "palm") {
+                  targetSpeed = (tipX - 0.5) * 0.25;
+              } else {
+                  targetSpeed = 0; // 食指指向时静止
+              }
+          }
+
+          const dist = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
+          if (dist < 0.04) {
+            if (!isPinching && !isLocked && !isReturning) { isPinching = true; pickup(); }
+          } else if (dist > 0.12) {
+            if (isPinching && isLocked) { isPinching = false; dissolveToDust(selectedCard); }
+            else { isPinching = false; }
+          }
+        } else { targetSpeed = 0; gestureMode = "none"; }
+      });
+
+      new Camera(video, { onFrame: async () => await hands.send({ image: video }), width: 640, height: 480 }).start();
+      document.getElementById('loader').style.opacity = '0';
+      setTimeout(() => { document.getElementById('loader').style.display = 'none'; animate(); }, 800);
+    }
+
+    function pickup() {
+      raycaster.setFromCamera(handCoord, camera);
+      const hits = raycaster.intersectObjects(cards);
+      if (hits.length > 0) {
+        isLocked = true; selectedCard = hits[0].object; scene.attach(selectedCard);
+        gsap.to(selectedCard.position, { x: 0, y: 0, z: -1.4, duration: 0.8, ease: "expo.out" });
+        gsap.to(selectedCard.rotation, { x: 0, y: Math.PI * 2, z: 0, duration: 1.0 });
+      } else { isPinching = false; }
+    }
+
+    function animate(time) {
+      requestAnimationFrame(animate);
+      const t = time * 0.001;
+
+      if (!isLocked) {
+        currentSpeed += (targetSpeed - currentSpeed) * 0.05;
+        currentSpeed *= 0.95;
+
+        if (!isReturning) {
+            raycaster.setFromCamera(handCoord, camera);
+            const hits = raycaster.intersectObjects(cards);
+            // 找到当前被射中的物体
+            const hitObject = hits.length > 0 ? hits[0].object : null;
+
+            cards.forEach(c => {
+                c.material.uniforms.uTime.value = t;
+                // 只有在食指模式且命中的情况下才浮起并喷发粒子
+                if (gestureMode === "pointing" && hitObject === c) {
+                    gsap.to(c.position, { y: 0.45, duration: 0.3 });
+                    emitHoverParticles(c); 
+                } else {
+                    gsap.to(c.position, { y: 0, duration: 0.5 });
+                }
+            });
+        }
+        masterGroup.rotation.y += currentSpeed;
+      } else if (selectedCard) {
+        selectedCard.material.uniforms.uTime.value = t;
+      }
+
+      for(let i=0; i<pCount; i++) {
+        if(pOpacity[i] > 0) {
+          pPositions[i*3] += pVel[i*3]; pPositions[i*3+1] += pVel[i*3+1]; pPositions[i*3+2] += pVel[i*3+2];
+          pOpacity[i] -= 0.02;
+          if (pOpacity[i] <= 0) pPositions[i*3+1] = -500;
+        }
+      }
+      pGeometry.attributes.position.needsUpdate = true;
+      renderer.render(scene, camera);
+    }
+
+    window.onload = startAuto;
+  </script>
+</body>
+</html>
