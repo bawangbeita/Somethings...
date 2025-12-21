@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Arcana - Geometric Mystery (Fixed)</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; }
+    #ui-right {
+      position: fixed; top: 40px; right: 40px; color: #FBD0E4; font-family: sans-serif; z-index: 100;
+      letter-spacing: 1px; font-size: 13px; background: rgba(251, 208, 228, 0.1);
+      padding: 15px 20px; border-right: 2px solid #FBD0E4; backdrop-filter: blur(8px);
+      line-height: 1.6; pointer-events: none;
+    }
+    .status-tag { opacity: 0.7; font-size: 11px; margin-bottom: 5px; display: block; }
+    #loader {
+      position: fixed; inset: 0; background: #000; display: flex;
+      align-items: center; justify-content: center; z-index: 2000;
+      color: #FBD0E4; font-family: serif; letter-spacing: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div id="loader">WAKING MAGIC...</div>
+  <div id="ui-right">
+    <span class="status-tag" id="state-label">阶段: 待机展示</span>
+    <div id="hint-main">请在镜头前伸出手掌</div>
+    <div id="hint-sub" style="font-size: 11px; opacity: 0.6; margin-top: 8px;">
+      · 移动手掌: 旋转卡牌<br>· 伸出食指: 瞄准选择
+    </div>
+  </div>
+  <div id="container"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.11.4/dist/gsap.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <script>
+    let scene, camera, renderer, masterGroup, reticleGroup, galaxyPoints;
+    let cards = [];
+    let state = 'SHOWREEL'; 
+    let interactionMode = 'PALM'; 
+    let isLocked = false, isReturning = false, selectedCard = null, isPinching = false;
+    let isAnimating = false, isReadyToRelease = false;
+    let targetSpeed = 0, currentSpeed = 0.005; 
+    let lostHandTimer = null; 
+
+    const lerpTargetPos = new THREE.Vector3(0, 0, 0);
+    const raycaster = new THREE.Raycaster();
+    const handCoord = new THREE.Vector2(-10, -10);
+    let pGeometry, pPositions, pOpacity, pVel, pCount = 1000;
+
+    function updateUI(mainHint, subHint, stateText) {
+      if (stateText) document.getElementById('state-label').innerText = `阶段: ${stateText}`;
+      if (mainHint) document.getElementById('hint-main').innerText = mainHint;
+      if (subHint) document.getElementById('hint-sub').innerHTML = subHint;
+    }
+
+    function initScene() {
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.set(0, 0, 6); 
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      document.getElementById('container').appendChild(renderer.domElement);
+
+      masterGroup = new THREE.Group();
+      scene.add(masterGroup);
+
+      createGalaxy();
+      createReticle();
+      createInteractionParticles();
+      createCards();
+    }
+
+    function createStarSprite() {
+      const canvas = document.createElement('canvas');
+      canvas.width = 64; canvas.height = 64;
+      const ctx = canvas.getContext('2d');
+      const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gradient.addColorStop(0, 'rgba(255,255,255,1)');
+      gradient.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = gradient; ctx.fillRect(0, 0, 64, 64);
+      return new THREE.CanvasTexture(canvas);
+    }
+
+    function createGalaxy() {
+      const gCount = 8000; 
+      const geo = new THREE.BufferGeometry();
+      const pos = new Float32Array(gCount * 3);
+      for (let i = 0; i < gCount; i++) {
+        const r = 10 + Math.random() * 40;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        pos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+        pos[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+        pos[i * 3 + 2] = r * Math.cos(phi);
+      }
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      const mat = new THREE.PointsMaterial({ size: 0.1, map: createStarSprite(), color: 0xffd1e8, transparent: true, opacity: 0.4, blending: THREE.AdditiveBlending, depthWrite: false });
+      galaxyPoints = new THREE.Points(geo, mat);
+      scene.add(galaxyPoints);
+    }
+
+    function createReticle() {
+      reticleGroup = new THREE.Group();
+      const core = new THREE.Mesh(new THREE.SphereGeometry(0.015, 16, 16), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+      reticleGroup.add(core); reticleGroup.visible = false; scene.add(reticleGroup);
+    }
+
+    function createInteractionParticles() {
+      pGeometry = new THREE.BufferGeometry();
+      pPositions = new Float32Array(pCount * 3);
+      pOpacity = new Float32Array(pCount);
+      pVel = new Float32Array(pCount * 3); 
+      for(let i=0; i<pCount; i++) { pPositions[i*3+1] = -500; pOpacity[i] = 0; }
+      pGeometry.setAttribute('position', new THREE.BufferAttribute(pPositions, 3));
+      scene.add(new THREE.Points(pGeometry, new THREE.PointsMaterial({ size: 0.02, color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false })));
+    }
+
+    function createCards() {
+      const radius = 4.0; 
+      const geo = new THREE.PlaneGeometry(1.2, 2.0);
+      for (let i = 0; i < 17; i++) {
+        const mat = new THREE.ShaderMaterial({
+          uniforms: { uOpacity: { value: 1.0 } },
+          vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+          fragmentShader: `
+            uniform float uOpacity;
+            varying vec2 vUv;
+            
+            void main() {
+              vec2 uv = vUv - 0.5;
+              // 基础裁切
+              float d = length(max(abs(uv)-vec2(0.45, 0.47),0.0));
+              if (d > 0.05) discard;
+
+              vec3 finalColor;
+              if (gl_FrontFacing) {
+                // 正面：珍珠粉色渐变
+                finalColor = mix(vec3(0.98, 0.88, 0.92), vec3(1.0, 0.96, 1.0), vUv.y);
+                float border = smoothstep(0.43, 0.45, max(abs(uv.x), abs(uv.y)*0.6));
+                finalColor = mix(finalColor, vec3(1.0), border);
+              } else {
+                // 背面：【强制重写花纹逻辑】
+                vec3 bgColor = vec3(0.5, 0.2, 0.35); 
+                vec3 lineCol = vec3(1.0, 0.9, 0.95);
+                
+                // 绘制逻辑
+                float dist = length(uv);
+                // 1. 中心圆环
+                float ring = smoothstep(0.01, 0.0, abs(dist - 0.2));
+                // 2. 十字光芒
+                float cross = smoothstep(0.01, 0.0, abs(uv.x * uv.y));
+                // 3. 菱形轮廓
+                float diamond = smoothstep(0.01, 0.0, abs(abs(uv.x * 1.5) + abs(uv.y) - 0.4));
+                // 4. 外边框亮线
+                float edge = smoothstep(0.43, 0.45, max(abs(uv.x), abs(uv.y)*0.6));
+                
+                float pattern = clamp(ring + cross + diamond + edge, 0.0, 1.0);
+                finalColor = mix(bgColor, lineCol, pattern);
+                finalColor += (1.0 - smoothstep(0.0, 0.5, dist)) * 0.2; // 中心发光
+              }
+              gl_FragColor = vec4(finalColor, uOpacity);
+            }
+          `, transparent: true, side: THREE.DoubleSide
+        });
+        const card = new THREE.Mesh(geo, mat);
+        const angle = (i / 17) * Math.PI * 2;
+        card.position.set(Math.sin(angle) * radius, 0, Math.cos(angle) * radius);
+        card.lookAt(0, 0, 0);
+        card.userData = { homePos: card.position.clone(), homeRot: card.rotation.clone() };
+        masterGroup.add(card);
+        cards.push(card);
+      }
+    }
+
+    function triggerMagicEntrance() {
+      state = 'TRANSITION';
+      updateUI("系统激活", "· 正在初始化感应器...", "魔力觉醒");
+      const tl = gsap.timeline({ onComplete: () => { state = 'INTERACTIVE'; }});
+      tl.to(masterGroup.position, { y: 12, duration: 1.0 });
+      tl.add(() => {
+        masterGroup.position.set(0, 0, 4);
+        cards.forEach((c, i) => { 
+          c.position.y = 12; 
+          c.material.uniforms.uOpacity.value = 1.0; 
+        });
+      });
+      tl.to(cards.map(c => c.position), { y: 0, duration: 2.0, stagger: 0.05, ease: "expo.out" });
+    }
+
+    async function startAuto() {
+      initScene();
+      const videoElement = document.createElement('video');
+      const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+      hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.75 });
+      
+      hands.onResults(results => {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+          lostHandTimer = null; 
+          if (state === 'SHOWREEL') triggerMagicEntrance();
+          if (state === 'INTERACTIVE') {
+            const lm = results.multiHandLandmarks[0];
+            const palmX = 1 - lm[9].x;   
+            handCoord.set(palmX * 2 - 1, -(lm[8].y * 2 - 1));
+            
+            const vector = new THREE.Vector3(handCoord.x, handCoord.y, 0.5).unproject(camera);
+            lerpTargetPos.copy(camera.position.clone().add(vector.sub(camera.position).normalize().multiplyScalar(0.4)));
+            
+            if (!isLocked) targetSpeed = (palmX - 0.5) * 0.2; else targetSpeed = 0;
+            
+            const dist = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
+            if (dist < 0.05 && !isPinching && !isLocked && !isReturning && !isAnimating) { 
+               isPinching = true; pickup(); 
+            } else if (dist > 0.09 && isPinching) { 
+               isPinching = false; if (isLocked && isReadyToRelease) dissolveToDust(selectedCard); 
+            }
+          }
+        } else if (isLocked && !isReturning && !isAnimating) {
+          if (!lostHandTimer) lostHandTimer = Date.now();
+          if (Date.now() - lostHandTimer > 3000) { dissolveToDust(selectedCard); lostHandTimer = null; }
+        }
+      });
+
+      new Camera(videoElement, { onFrame: async () => { await hands.send({ image: videoElement }); }, width: 640, height: 480 }).start();
+      document.getElementById('loader').style.opacity = '0';
+      setTimeout(() => document.getElementById('loader').style.display = 'none', 800);
+      animate();
+    }
+
+    function pickup() {
+      if (isAnimating) return;
+      raycaster.setFromCamera(handCoord, camera);
+      const hits = raycaster.intersectObjects(cards);
+      if (hits.length > 0) {
+        isAnimating = true; isLocked = true; isReadyToRelease = false;
+        selectedCard = hits[0].object;
+        gsap.killTweensOf(selectedCard.position);
+        scene.attach(selectedCard);
+        gsap.to(selectedCard.position, { x: 0, y: 0, z: 3.5, duration: 0.8, onComplete: () => { isAnimating = false; isReadyToRelease = true; } });
+        // 旋转展示正面（渐变色面）
+        gsap.to(selectedCard.rotation, { x: 0, y: 0, z: 0, duration: 1.0 });
+        updateUI("卡牌已启封", "· 张开手掌以释放", "卡牌互动");
+      }
+    }
+
+    function dissolveToDust(card) {
+      if (!card || isReturning) return;
+      isReturning = true; isAnimating = true; isReadyToRelease = false;
+      const currentPos = new THREE.Vector3();
+      card.getWorldPosition(currentPos);
+      
+      const releaseTl = gsap.timeline({ onComplete: () => {
+          card.position.copy(card.userData.homePos);
+          card.rotation.copy(card.userData.homeRot); // 回到花纹面向外的旋转
+          masterGroup.add(card);
+          gsap.to(card.material.uniforms.uOpacity, { value: 1.0, duration: 0.5, onComplete: () => { 
+            isLocked = false; isReturning = false; selectedCard = null; isAnimating = false; 
+          }});
+      }});
+      releaseTl.to(card.material.uniforms.uOpacity, { value: 0, duration: 0.5 });
+      
+      for(let i=0; i < 50; i++) {
+        const idx = Math.floor(Math.random() * pCount);
+        pPositions[idx*3] = currentPos.x + (Math.random()-0.5);
+        pPositions[idx*3+1] = currentPos.y + (Math.random()-0.5);
+        pPositions[idx*3+2] = currentPos.z;
+        pOpacity[idx] = 1.0; pVel[idx*3+1] = 0.05;
+      }
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      reticleGroup.position.lerp(lerpTargetPos, 0.15);
+      if (galaxyPoints) galaxyPoints.rotation.y += 0.001;
+      
+      if (state === 'INTERACTIVE' && !isLocked) {
+        currentSpeed += (targetSpeed - currentSpeed) * 0.05;
+        masterGroup.rotation.y += currentSpeed;
+      }
+      
+      for(let i=0; i<pCount; i++) {
+        if(pOpacity[i] > 0) { pPositions[i*3+1] += pVel[i*3+1]; pOpacity[i] -= 0.02; }
+      }
+      pGeometry.attributes.position.needsUpdate = true;
+      renderer.render(scene, camera);
+    }
+    window.onload = startAuto;
+  </script>
+</body>
+</html>
